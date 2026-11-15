@@ -1,0 +1,26 @@
+[Unit]
+Description=Mykolaiv outage schedule Telegram bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=outagebot
+Group=outagebot
+WorkingDirectory=/opt/outage-bot
+EnvironmentFile=/etc/outage-bot.env
+Environment=DATABASE_PATH=/var/lib/outage-bot/bot.sqlite3
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/outage-bot/.venv/bin/python -m outage_bot.app
+Restart=always
+RestartSec=10
+StateDirectory=outage-bot
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
