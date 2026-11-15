@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from outage_bot.engine import due_events
-from outage_bot.schedule import Interval, Schedule, parse_schedule, render_day
+from outage_bot.schedule import Interval, Schedule, describe, parse_schedule, render_day
 from outage_bot.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,9 +22,26 @@ class ScheduleTests(unittest.TestCase):
 
     def test_saved_provider_response(self):
         result = parse_schedule(json.loads((ROOT / "active.json").read_text()), self.slots)
-        self.assertEqual(result.days, {date(2026, 11, 13)})
-        self.assertTrue(result.intervals)
+        self.assertEqual(result.days, {date(2026, 11, 15), date(2026, 11, 16)})
+        # Exact queue 5.1 intervals in the updated multi-day provider sample.
+        self.assertEqual(
+            [(i.start.strftime("%d %H:%M"), i.end.strftime("%d %H:%M"), i.kind)
+             for i in result.intervals],
+            [("15 15:00", "15 15:30", "PROBABLY_OFF"),
+             ("15 15:30", "15 19:00", "SURE_OFF"),
+             ("15 19:00", "15 21:30", "OFF"),
+             ("15 21:30", "15 22:00", "PROBABLY_OFF"),
+             ("16 12:00", "16 12:30", "PROBABLY_OFF"),
+             ("16 12:30", "16 15:00", "OFF"),
+             ("16 15:00", "16 15:30", "PROBABLY_OFF")])
         self.assertEqual(Schedule.from_json(result.to_json()), result)
+
+    def test_sure_off_merges_and_keeps_neighboring_statuses(self):
+        result = self.schedule([(24, 1, "PROBABLY_OFF"), (24, 2, "SURE_OFF"),
+                                (24, 3, "SURE_OFF"), (24, 4, "OFF")])
+        self.assertEqual([i.kind for i in result.intervals], ["PROBABLY_OFF", "SURE_OFF", "OFF"])
+        self.assertEqual(result.intervals[1].end - result.intervals[1].start, timedelta(hours=1))
+        self.assertIn("Актуальне відключення за даними оператора", describe(result.intervals[1]))
 
     def test_merge_midnight_and_queue_filter(self):
         result = self.schedule([(24, 47, "OFF"), (24, 48, "OFF"), (25, 1, "OFF")])
@@ -78,6 +95,18 @@ class ReminderTests(unittest.TestCase):
         start = datetime(2026, 10, 25, 1, tzinfo=UTC)
         schedule = Schedule([Interval(start, start + timedelta(hours=1), "OFF")], {start.date()})
         self.assertEqual(list(due_events(schedule, start, 30, 0)), [])
+
+    def test_sure_off_alerts_keep_operator_status(self):
+        interval = Interval(self.start, self.interval.end, "SURE_OFF")
+        schedule = Schedule([interval], {self.start.date()})
+        for delta, kind in [(-30, "before"), (0, "start"), (60, "end")]:
+            events = list(due_events(schedule, self.start + timedelta(minutes=delta), 30, 0))
+            self.assertEqual(len(events), 1)
+            self.assertTrue(events[0][0].endswith(kind))
+            self.assertIn("Актуальне відключення за даними оператора", events[0][1])
+            if kind == "start":
+                self.assertIn("Оператор позначив", events[0][1])
+                self.assertIn("за вашою адресою не підтверджено", events[0][1])
 
     def test_storage_survives_restart(self):
         with tempfile.TemporaryDirectory() as temp:

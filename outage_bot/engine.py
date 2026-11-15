@@ -9,11 +9,13 @@ def due_events(schedule: Schedule, now: datetime, minutes: int, since: float):
         return
     # Catch up only recent events; never deliver yesterday's reminders after downtime.
     for interval in schedule.intervals:
+        start_text = ("Оператор позначив інтервал як актуальне відключення."
+                      if interval.kind == "SURE_OFF" else "Початок інтервалу за графіком.")
         events = [
             ("before", interval.start - timedelta(minutes=minutes),
              f"Незабаром: {describe(interval)}"),
             ("start", interval.start,
-             f"Початок інтервалу за графіком.\n{describe(interval)}\nФактичне знеструмлення не підтверджено."),
+             f"{start_text}\n{describe(interval)}\nФактичне знеструмлення за вашою адресою не підтверджено."),
             ("end", interval.end,
              f"Інтервал за графіком завершився.\n{describe(interval)}\nФактичне відновлення не підтверджено."),
         ]

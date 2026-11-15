@@ -1,6 +1,6 @@
 # Mykolaiv outage schedule bot
 
-Python Telegram bot for **Миколаївобленерго, queue 5.1 (ID 24)**. Messages are in Ukrainian. It sends 15/30-minute reminders, scheduled start/end messages, schedule changes, and one warning per stale-data episode. `OFF` and `PROBABLY_OFF` remain distinct. These are schedule notifications, not confirmation of electricity at a home. No address or electricity account credentials are collected.
+Python Telegram bot for **Миколаївобленерго, queue 5.1 (ID 24)**. Messages are in Ukrainian. It sends 15/30-minute reminders, scheduled start/end messages, schedule changes, and one warning per stale-data episode. `OFF`, `PROBABLY_OFF`, and `SURE_OFF` remain distinct. These are schedule/operator-status notifications, not confirmation of electricity at a home. No address or electricity account credentials are collected.
 
 ## Run locally
 
@@ -33,6 +33,8 @@ The following public endpoints were checked during development:
 - `https://off.energy.mk.ua/api/outage-queue/by-type/3`
 
 The parser joins queue/time-slot IDs and derives the local calendar date from the schedule's timezone-aware `from`. Adjacent slots of the same category are merged. End-at-midnight slots roll to the next day. Missing publication differs from a published schedule with no intervals. Unknown categories, missing slot definitions, overlaps, or changed queue mapping reject the refresh and retain the previous snapshot.
+
+Supported categories match the [operator's public schedule legend](https://off.energy.mk.ua/): `OFF` is a scheduled outage, `PROBABLY_OFF` is a possible outage, and `SURE_OFF` is an operator-reported current outage ("Актуальне відключення"). The updated November 15–16 sample includes `SURE_OFF` alongside the other categories. It is preserved in storage, schedule-change detection, schedule commands, and reminders; it does not establish that a particular home has lost power.
 
 Each polling cycle fetches once for all users. Defaults: fetch every 180 seconds, check notifications every 20 seconds, suppress timed alerts after 900 seconds without a valid refresh. Fetch failures use bounded exponential backoff. A successful fetch must include today's publication; tomorrow-only or old publications are not considered fresh. Freshness means successful retrieval, not a guarantee that the operator has updated its underlying data.
 

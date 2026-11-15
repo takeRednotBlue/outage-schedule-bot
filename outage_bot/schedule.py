@@ -5,6 +5,11 @@ from zoneinfo import ZoneInfo
 
 KYIV = ZoneInfo("Europe/Kyiv")
 SOURCE = "https://off.energy.mk.ua/"
+STATUS_LABELS = {
+    "OFF": "Відключення за графіком",
+    "PROBABLY_OFF": "Можливе відключення",
+    "SURE_OFF": "Актуальне відключення за даними оператора",
+}
 
 
 def transition_day(day: date) -> bool:
@@ -60,7 +65,7 @@ def parse_schedule(active: list, slots: list, queue_id: int = 24) -> Schedule:
             if row["outage_queue_id"] != queue_id:
                 continue
             kind = row["type"]
-            if kind not in {"OFF", "PROBABLY_OFF"}:
+            if kind not in STATUS_LABELS:
                 raise ValueError(f"Unknown outage type: {kind}")
             start_time, end_time = slot_map[row["time_series_id"]]
             start = datetime.combine(day, start_time, KYIV).astimezone(UTC)
@@ -82,7 +87,7 @@ def parse_schedule(active: list, slots: list, queue_id: int = 24) -> Schedule:
 
 
 def describe(interval: Interval) -> str:
-    label = "Відключення за графіком" if interval.kind == "OFF" else "Можливе відключення"
+    label = STATUS_LABELS[interval.kind]
     return (f"{interval.start.astimezone(KYIV):%d.%m %H:%M} — "
             f"{interval.end.astimezone(KYIV):%d.%m %H:%M}: {label}")
 
