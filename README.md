@@ -77,7 +77,7 @@ sudo systemctl status outage-bot
 sudo journalctl -u outage-bot -n 50
 ```
 
-Keep application files owned by the deploy administrator, readable/executable by the service user. systemd creates `/var/lib/outage-bot` for the writable database; that path overrides `.env`'s local path. No inbound application port is needed. Use `/status` to check successful fetches after deployment. Pin the exact tested dependency versions for repeatable production deployments.
+Keep application files owned by the deploy administrator, readable/executable by the service user. systemd creates `/var/lib/outage-bot` for the writable database. The application prefers systemd's `STATE_DIRECTORY` over `DATABASE_PATH`, so an old relative database path in the environment file cannot redirect writes into the protected application directory. Outside systemd, `DATABASE_PATH` remains configurable. No inbound application port is needed. Use `/status` to check successful fetches after deployment. Pin the exact tested dependency versions for repeatable production deployments.
 
 Back up SQLite using its online backup API (copying just the database while WAL is active is unsafe):
 

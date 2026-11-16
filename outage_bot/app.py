@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 import time
 
 import httpx
@@ -18,6 +19,22 @@ from .storage import Store
 
 LOG = logging.getLogger(__name__)
 BASE = "https://off.energy.mk.ua"
+HELP_TEXT = (
+    "Графік\n"
+    "/today — сьогодні\n/tomorrow — завтра\n/next — поточне або наступне відключення\n\n"
+    "Налаштування\n"
+    "/settings — час нагадування\n/status — стан бота й свіжість даних\n"
+    "/pause — призупинити сповіщення\n/resume — відновити\n/delete — видалити підписку"
+)
+
+
+def database_path():
+    # systemd supplies a writable StateDirectory, even if an old env file
+    # sets DATABASE_PATH to a relative path under the read-only application.
+    state_directory = os.environ.get("STATE_DIRECTORY")
+    if state_directory:
+        return str(Path(state_directory.split(":")[0]) / "bot.sqlite3")
+    return os.environ.get("DATABASE_PATH", "data/bot.sqlite3")
 
 
 class Application:
@@ -77,7 +94,7 @@ class Application:
                     # One warning per failure episode, after the initial grace period.
                     if now.timestamp() - self.started >= self.stale_seconds:
                         await self.send_once(chat_id, f"stale:{self.store.get('last_success', 0)}",
-                                             "Не вдається оновити графік. Нагадування призупинено до отримання свіжих даних.", now.timestamp())
+                                             "⚠️ Не вдається оновити графік\n\nНагадування призупинено до отримання свіжих даних.", now.timestamp())
                     continue
                 if schedule is None:
                     continue
@@ -85,7 +102,7 @@ class Application:
                 if revision:
                     day = now.astimezone(KYIV).date()
                     await self.send_once(chat_id, f"change:{revision}",
-                                         "Графік змінився. Попередні нагадування можуть бути неактуальними.\n\n" +
+                                         "🔄 Графік змінився\nПопередні нагадування можуть бути неактуальними.\n\n" +
                                          render_day(schedule, day) + "\n\n" + render_day(schedule, day + timedelta(days=1)), now.timestamp())
                     self.store.put(f"change:{chat_id}", None)
                 for key, text in due_events(schedule, now, subscriber["minutes"], subscriber["since"]):
@@ -128,46 +145,56 @@ class Application:
         if command in {"/start", "/resume"}:
             self.store.subscribe(chat_id, now.timestamp())
             self.store.put(f"change:{chat_id}", None)
-            text = ("Сповіщення увімкнено: Миколаївобленерго, черга 5.1.\n"
-                    "Нагадування за 30 хв за замовчуванням. /settings 15 або /settings 30\n"
-                    "/today /tomorrow /next /status /pause /resume /delete\n"
+            subscriber = self.store.subscriber(chat_id)
+            text = ("🔔 Сповіщення увімкнено\nМиколаївобленерго · черга 5.1\n"
+                    f"Нагадування за {subscriber['minutes']} хв\n\n"
+                    f"{HELP_TEXT}\n\n"
                     "Повідомлення базуються на графіку й не підтверджують фактичний стан світла.")
         elif command == "/delete":
             self.store.forget(chat_id)
             text = "Підписку та історію сповіщень видалено."
         elif command == "/pause":
             self.store.pause(chat_id)
-            text = "Сповіщення призупинено. /resume — увімкнути."
+            text = "Сповіщення призупинено\n\n/resume — увімкнути знову."
         elif command == "/settings":
             subscriber = self.store.subscriber(chat_id)
             if subscriber is None:
                 text = "Спочатку виконайте /start."
             elif len(words) == 2 and words[1] in {"15", "30"}:
                 self.store.reminder(chat_id, int(words[1]))
-                text = f"Нагадування за {words[1]} хв."
+                text = f"🔔 Нагадування за {words[1]} хв."
             else:
-                text = f"Нагадування за {subscriber['minutes']} хв. Змінити: /settings 15 або /settings 30."
+                text = (f"Нагадування за {subscriber['minutes']} хв\n\n"
+                        "Оберіть час:\n/settings 15 — за 15 хв\n/settings 30 — за 30 хв")
         elif command == "/status":
             last = self.store.get("last_success")
             stamp = datetime.fromtimestamp(last, KYIV).strftime("%d.%m %H:%M:%S") if last else "ще немає"
             subscriber = self.store.subscriber(chat_id)
-            text = (f"Миколаївобленерго · черга 5.1\nОстаннє отримання: {stamp}\n"
+            indicator = "✅" if self.fresh(now.timestamp()) else "⚠️"
+            text = (f"{indicator} Стан бота\nМиколаївобленерго · черга 5.1\n\n"
                     f"Дані: {'свіжі' if self.fresh(now.timestamp()) else 'застарілі / недоступні'}\n"
+                    f"Останнє оновлення: {stamp} (Київ)\n\n"
                     f"Сповіщення: {'увімкнено' if subscriber and subscriber['active'] else 'вимкнено'}")
+            if subscriber:
+                text += f"\nНагадування за {subscriber['minutes']} хв"
         elif command in {"/today", "/tomorrow", "/next"}:
             if schedule is None:
                 text = "Графік поки недоступний. Спробуйте пізніше."
             elif command == "/next":
                 upcoming = next((i for i in schedule.intervals if i.end > now), None)
-                text = describe(upcoming) if upcoming else "У доступному графіку немає наступних інтервалів."
+                if upcoming:
+                    title = "Поточний інтервал" if upcoming.start <= now else "Наступний інтервал"
+                    text = f"{title}\nЧерга 5.1 · час за Києвом\n\n{describe(upcoming)}"
+                else:
+                    text = "У доступному графіку немає наступних інтервалів."
             else:
                 day = now.astimezone(KYIV).date() + timedelta(days=command == "/tomorrow")
                 text = render_day(schedule, day)
             if schedule and not self.fresh(now.timestamp()):
-                text = "⚠️ Збережені дані застарілі.\n" + text
+                text = "⚠️ Збережені дані застарілі.\n\n" + text
         else:
-            text = "/start /today /tomorrow /next /settings /status /pause /resume /delete"
-        await message.answer(text + f"\n\n{SOURCE}")
+            text = HELP_TEXT
+        await message.answer(text + f"\n\nДжерело: {SOURCE}")
 
 
 async def run():
@@ -178,7 +205,12 @@ async def run():
     stale = int(os.environ.get("STALE_SECONDS", "900"))
     if poll < 60 or stale < poll * 2:
         raise SystemExit("POLL_SECONDS must be >=60; STALE_SECONDS must be >=2*POLL_SECONDS")
-    store = Store(os.environ.get("DATABASE_PATH", "data/bot.sqlite3"))
+    path = database_path()
+    try:
+        store = Store(path)
+    except OSError as exc:
+        raise SystemExit(f"Cannot create database directory for {path!r}. "
+                         "Check the service StateDirectory and directory ownership.") from exc
     async with Bot(token) as bot, httpx.AsyncClient(timeout=20, headers={"User-Agent": "MykolaivScheduleBot/0.1"}) as client:
         app = Application(bot, client, store, poll, stale)
         dispatcher = Dispatcher()

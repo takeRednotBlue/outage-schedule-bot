@@ -9,15 +9,15 @@ def due_events(schedule: Schedule, now: datetime, minutes: int, since: float):
         return
     # Catch up only recent events; never deliver yesterday's reminders after downtime.
     for interval in schedule.intervals:
-        start_text = ("Оператор позначив інтервал як актуальне відключення."
-                      if interval.kind == "SURE_OFF" else "Початок інтервалу за графіком.")
+        start_text = ("⚡ Оператор позначив інтервал як актуальне відключення."
+                      if interval.kind == "SURE_OFF" else "⚡ Початок інтервалу за графіком")
         events = [
             ("before", interval.start - timedelta(minutes=minutes),
-             f"Незабаром: {describe(interval)}"),
+             f"⏰ Нагадування за {minutes} хв\nЧерга 5.1 · час за Києвом\n\n{describe(interval)}"),
             ("start", interval.start,
-             f"{start_text}\n{describe(interval)}\nФактичне знеструмлення за вашою адресою не підтверджено."),
+             f"{start_text}\nЧерга 5.1 · час за Києвом\n\n{describe(interval)}\n\nФактичне знеструмлення за вашою адресою не підтверджено."),
             ("end", interval.end,
-             f"Інтервал за графіком завершився.\n{describe(interval)}\nФактичне відновлення не підтверджено."),
+             f"Інтервал за графіком завершився\nЧерга 5.1 · час за Києвом\n\n{describe(interval)}\n\nФактичне відновлення не підтверджено."),
         ]
         for kind, at, text in events:
             if at.timestamp() < since or not timedelta(0) <= now - at <= timedelta(minutes=5):

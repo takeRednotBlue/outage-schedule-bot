@@ -86,16 +86,18 @@ def parse_schedule(active: list, slots: list, queue_id: int = 24) -> Schedule:
     return Schedule(merged, days)
 
 
-def describe(interval: Interval) -> str:
+def describe(interval: Interval, *, include_date: bool = True) -> str:
     label = STATUS_LABELS[interval.kind]
-    return (f"{interval.start.astimezone(KYIV):%d.%m %H:%M} — "
-            f"{interval.end.astimezone(KYIV):%d.%m %H:%M}: {label}")
+    start, end = interval.start.astimezone(KYIV), interval.end.astimezone(KYIV)
+    start_format = "%d.%m %H:%M" if include_date else "%H:%M"
+    end_format = "%d.%m %H:%M" if include_date or end.date() != start.date() else "%H:%M"
+    return f"{start.strftime(start_format)} — {end.strftime(end_format)}\n{label}"
 
 
 def render_day(schedule: Schedule, day: date) -> str:
     if day not in schedule.days:
-        return f"На {day:%d.%m} графік ще не опубліковано або недоступний."
+        return f"Черга 5.1 · {day:%d.%m}\n\nГрафік ще не опубліковано або недоступний."
     start = datetime.combine(day, time.min, KYIV).astimezone(UTC)
     end = datetime.combine(day + timedelta(days=1), time.min, KYIV).astimezone(UTC)
-    rows = [describe(i) for i in schedule.intervals if i.start < end and i.end > start]
-    return f"Черга 5.1 · {day:%d.%m}\n" + ("\n".join(rows) if rows else "У публікації немає інтервалів відключення для цієї черги.")
+    rows = [describe(i, include_date=False) for i in schedule.intervals if i.start < end and i.end > start]
+    return f"Черга 5.1 · {day:%d.%m}\nЧас за Києвом\n\n" + ("\n\n".join(rows) if rows else "У публікації немає інтервалів відключення для цієї черги.")

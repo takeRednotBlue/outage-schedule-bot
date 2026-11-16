@@ -2,13 +2,29 @@ from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import unittest
-from unittest.mock import AsyncMock
+import tempfile
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from outage_bot.app import Application
+from outage_bot.app import Application, database_path
 from outage_bot.schedule import KYIV, Interval, Schedule
 from outage_bot.storage import Store
+
+
+class DatabaseConfigurationTests(unittest.TestCase):
+    def test_service_uses_writable_state_directory_despite_old_env_path(self):
+        with tempfile.TemporaryDirectory() as state:
+            with patch.dict("os.environ", {"STATE_DIRECTORY": state,
+                                          "DATABASE_PATH": "/proc/outage-bot/data/bot.sqlite3"}):
+                store = Store(database_path())
+                store.subscribe(123, 0)
+                store.db.close()
+            self.assertTrue((Path(state) / "bot.sqlite3").is_file())
+
+    def test_local_database_path_remains_configurable(self):
+        with patch.dict("os.environ", {"DATABASE_PATH": "custom/bot.sqlite3"}, clear=True):
+            self.assertEqual(database_path(), "custom/bot.sqlite3")
 
 
 class AppTests(unittest.IsolatedAsyncioTestCase):
