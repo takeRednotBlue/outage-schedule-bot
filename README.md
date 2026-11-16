@@ -62,6 +62,8 @@ GitHub Actions scheduling can be delayed/dropped, so use it for CI rather than t
 
 ## Deploy to a Linux VM
 
+For automatic updates after the first deployment, follow [GitHub Actions setup](deploy/AUTOMATION.md). Pushes to `main` will test and deploy a fresh release over SSH.
+
 On an Ubuntu/Debian VM, install Python 3.12+ with venv support. Copy the project to `/opt/outage-bot`, excluding `.env`, `.venv`, local databases and caches. Build its virtual environment there and install with `pip install .` (no editable install needed in deployment).
 
 ```bash
