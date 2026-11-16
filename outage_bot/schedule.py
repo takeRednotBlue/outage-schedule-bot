@@ -94,10 +94,10 @@ def describe(interval: Interval, *, include_date: bool = True) -> str:
     return f"{start.strftime(start_format)} — {end.strftime(end_format)}\n{label}"
 
 
-def render_day(schedule: Schedule, day: date) -> str:
+def render_day(schedule: Schedule, day: date, queue: str = "5.1") -> str:
     if day not in schedule.days:
-        return f"Черга 5.1 · {day:%d.%m}\n\nГрафік ще не опубліковано або недоступний."
+        return f"📅 Черга {queue} · {day:%d.%m}\n\nГрафік ще не опубліковано або недоступний."
     start = datetime.combine(day, time.min, KYIV).astimezone(UTC)
     end = datetime.combine(day + timedelta(days=1), time.min, KYIV).astimezone(UTC)
     rows = [describe(i, include_date=False) for i in schedule.intervals if i.start < end and i.end > start]
-    return f"Черга 5.1 · {day:%d.%m}\nЧас за Києвом\n\n" + ("\n\n".join(rows) if rows else "У публікації немає інтервалів відключення для цієї черги.")
+    return f"📅 Черга {queue} · {day:%d.%m}\nЧас за Києвом\n\n" + ("\n\n".join(rows) if rows else "У публікації немає інтервалів відключення для цієї черги.")

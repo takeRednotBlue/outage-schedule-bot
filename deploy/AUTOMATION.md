@@ -48,7 +48,7 @@ Commit your intended files and push to `main`. On GitHub, open **Actions → Tes
 
 The remote script builds a new virtual environment inside `/opt/outage-bot/releases/` while the old bot keeps running. It then stops the service, points `/opt/outage-bot/current` at the new release, and writes a systemd drop-in at `/etc/systemd/system/outage-bot.service.d/20-release.conf`. The existing service's user, token configuration, and database path remain in effect. Source files removed from Git do not survive inside the new release.
 
-If the process crashes during its 15-second startup check, the script restores the previous release/configuration and restarts the service. This check verifies the process only; it cannot establish that Telegram delivery or provider fetching works. Check `/status` and `/today` after deploying. Rollback does not undo database migrations; this version introduces none.
+If the process crashes during its 15-second startup check, the script restores the previous release/configuration and restarts the service. This check verifies the process only; it cannot establish that Telegram delivery or provider fetching works. Check `/status` and `/today` after deploying. Rollback does not undo database migrations. The queue-selection update adds a `queue` column to subscriptions, defaulting to 5.1; older code can still read these subscriptions, but displays and notifies only for 5.1.
 
 Old releases are retained for recovery and consume disk space; review and remove unused releases periodically, keeping the active release and a known working predecessor. The script does not update the base systemd unit automatically; apply intentional changes to `deploy/outage-bot.service` separately.
 

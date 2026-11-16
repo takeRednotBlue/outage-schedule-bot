@@ -21,6 +21,11 @@ class Store:
                 chat_id INTEGER NOT NULL, event TEXT NOT NULL, sent REAL NOT NULL,
                 PRIMARY KEY(chat_id, event));
         """)
+        # Existing installations keep their subscriptions and default to 5.1.
+        columns = {r["name"] for r in self.db.execute("PRAGMA table_info(subscribers)")}
+        if "queue" not in columns:
+            with self.db:
+                self.db.execute("ALTER TABLE subscribers ADD COLUMN queue TEXT NOT NULL DEFAULT '5.1'")
 
     def subscribe(self, chat_id: int, now: float):
         with self.db:
@@ -41,6 +46,11 @@ class Store:
         with self.db:
             self.db.execute("UPDATE subscribers SET minutes=? WHERE chat_id=?", (minutes, chat_id))
 
+    def select_queue(self, chat_id, queue, now):
+        with self.db:
+            self.db.execute("UPDATE subscribers SET queue=?, since=? WHERE chat_id=?", (queue, now, chat_id))
+            self.db.execute("DELETE FROM state WHERE key=?", (f"change:{chat_id}",))
+
     def forget(self, chat_id):
         with self.db:
             self.db.execute("DELETE FROM subscribers WHERE chat_id=?", (chat_id,))
@@ -52,12 +62,19 @@ class Store:
         return json.loads(row[0]) if row else default
 
     def put(self, key, value):
-        with self.db:
-            self.db.execute("INSERT INTO state VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                            (key, json.dumps(value)))
+        self.put_many({key: value})
 
-    def load_schedule(self):
-        value = self.get("schedule")
+    def put_many(self, values):
+        with self.db:
+            self.db.executemany("INSERT INTO state VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                                [(key, json.dumps(value)) for key, value in values.items()])
+
+    def load_schedule(self, queue="5.1"):
+        schedules = self.get("schedules")
+        if schedules is not None:
+            value = schedules.get(queue)
+        else:
+            value = self.get("schedule") if queue == "5.1" else None
         return Schedule.from_json(value) if value is not None else None
 
     def delivered(self, chat_id, event):

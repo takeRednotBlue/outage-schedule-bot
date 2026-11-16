@@ -1,6 +1,6 @@
 # Mykolaiv outage schedule bot
 
-Python Telegram bot for **Миколаївобленерго, queue 5.1 (ID 24)**. Messages are in Ukrainian. It sends 15/30-minute reminders, scheduled start/end messages, schedule changes, and one warning per stale-data episode. `OFF`, `PROBABLY_OFF`, and `SURE_OFF` remain distinct. These are schedule/operator-status notifications, not confirmation of electricity at a home. No address or electricity account credentials are collected.
+Python Telegram bot for **Миколаївобленерго**, with a selectable outage queue per user (default **5.1**). Messages are in Ukrainian. It sends 15/30-minute reminders, scheduled start/end messages, schedule changes, and one warning per stale-data episode. `OFF`, `PROBABLY_OFF`, and `SURE_OFF` remain distinct. These are schedule/operator-status notifications, not confirmation of electricity at a home. No address or electricity account credentials are collected.
 
 ## Run locally
 
@@ -20,7 +20,13 @@ set +a
 
 The application reads environment variables; it does not automatically load `.env`. Never commit your real token. Start a private conversation with your bot and send `/start`. Telegram bots cannot initiate a conversation with you.
 
-Commands: `/today`, `/tomorrow`, `/next`, `/settings 15`, `/settings 30`, `/status`, `/pause`, `/resume`, `/delete`. Resuming preserves the selected reminder lead time. `/next` includes an ongoing interval. Only this provider/queue is supported in v0.1.
+Send `/start` or `/menu` to open the inline interface. View today's/tomorrow's schedule, the next outage, settings, and bot status by tapping buttons. Navigation edits the same message. Alerts also include menu buttons. A few emojis mark important notifications; the controls use short Ukrainian labels.
+
+To switch queues, tap **«Черга … · змінити»**, then the queue number. Subqueues appear side by side (1.1 / 1.2, etc.); a checkmark shows the current selection. Tap **«Показати графік»** to view its schedule. Settings offer 15/30-minute reminder buttons, pause/resume, queue selection, and subscription deletion. Deletion through the inline menu requires confirmation. Use **«Головне меню»** to return at any time.
+
+Commands remain available: `/menu`, `/today`, `/tomorrow`, `/next`, `/queue`, `/settings 15`, `/settings 30`, `/status`, `/pause`, `/resume`, `/delete`. The explicit `/delete` command still deletes immediately. Resuming preserves the selected queue and reminder lead time. `/next` includes an ongoing interval. Only the Mykolaiv provider is supported.
+
+Send `/queue` to open the queue buttons, or `/queue 2.1` (for example) to select one directly. Each user has one independent selection: `/today`, `/tomorrow`, `/next`, `/status`, reminders, and schedule-change notices all use it. Changing queues preserves reminder timing and pause state, clears pending change notices for the previous queue, and skips reminders whose due time predates the selection. Existing subscriptions migrate automatically to queue 5.1 without losing their settings. Queue names and IDs are refreshed from the operator's catalog; before the first successful fetch, `/queue` offers the known 1.1–6.2 choices. A missing queue never silently falls back to another queue's schedule. Older buttons are checked against the current catalog; deleted subscriptions are not recreated by navigation or queue-selection buttons.
 
 Run **one instance per token/database**. Long polling requires no public port or domain. If this bot previously used webhooks, remove its webhook before starting long polling; the application does not change webhook settings automatically.
 
@@ -32,7 +38,7 @@ The following public endpoints were checked during development:
 - `https://off.energy.mk.ua/api/schedule/time-series`
 - `https://off.energy.mk.ua/api/outage-queue/by-type/3`
 
-The parser joins queue/time-slot IDs and derives the local calendar date from the schedule's timezone-aware `from`. Adjacent slots of the same category are merged. End-at-midnight slots roll to the next day. Missing publication differs from a published schedule with no intervals. Unknown categories, missing slot definitions, overlaps, or changed queue mapping reject the refresh and retain the previous snapshot.
+The parser joins queue/time-slot IDs and derives the local calendar date from the schedule's timezone-aware `from`. Adjacent slots of the same category are merged. End-at-midnight slots roll to the next day. Missing publication differs from a published schedule with no intervals. Unknown categories, missing slot definitions, overlaps, or invalid queue mappings reject the refresh and retain the previous snapshot. Valid queue ID changes are followed using the operator's current catalog.
 
 Supported categories match the [operator's public schedule legend](https://off.energy.mk.ua/): `OFF` is a scheduled outage, `PROBABLY_OFF` is a possible outage, and `SURE_OFF` is an operator-reported current outage ("Актуальне відключення"). The updated November 15–16 sample includes `SURE_OFF` alongside the other categories. It is preserved in storage, schedule-change detection, schedule commands, and reminders; it does not establish that a particular home has lost power.
 

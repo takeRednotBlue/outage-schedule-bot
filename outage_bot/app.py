@@ -4,25 +4,30 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import time
 
 import httpx
 from aiogram import Bot, Dispatcher
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command
-from aiogram.types import BotCommand, Message
+from aiogram.types import BotCommand, CallbackQuery, LinkPreviewOptions, Message
 
 from .engine import due_events
 from .schedule import KYIV, SOURCE, describe, parse_schedule, render_day
 from .storage import Store
+from .ui import delete_menu, menu, queue_menu, settings_menu
 
 LOG = logging.getLogger(__name__)
 BASE = "https://off.energy.mk.ua"
+DEFAULT_QUEUES = [f"{group}.{part}" for group in range(1, 7) for part in (1, 2)]
 HELP_TEXT = (
+    "/menu — головне меню з кнопками\n\n"
     "Графік\n"
     "/today — сьогодні\n/tomorrow — завтра\n/next — поточне або наступне відключення\n\n"
     "Налаштування\n"
+    "/queue — обрати чергу\n"
     "/settings — час нагадування\n/status — стан бота й свіжість даних\n"
     "/pause — призупинити сповіщення\n/resume — відновити\n/delete — видалити підписку"
 )
@@ -53,32 +58,47 @@ class Application:
         for response in responses:
             response.raise_for_status()
         active, slots, queues = [r.json() for r in responses]
-        if not any(q["id"] == 24 and q["name"] == "5.1" and not q.get("deleted") for q in queues):
-            raise ValueError("Queue 5.1 mapping changed")
-        schedule = parse_schedule(active, slots)
+        catalog = {}
+        for row in queues:
+            if row.get("deleted") or row.get("type_id", 3) != 3:
+                continue
+            name, queue_id = row["name"], row["id"]
+            if not isinstance(name, str) or not re.fullmatch(r"[0-9]+\.[0-9]+", name) or len(name) > 16:
+                raise ValueError("Invalid queue name")
+            if name in catalog or not isinstance(queue_id, int) or queue_id in catalog.values():
+                raise ValueError("Invalid queue mapping")
+            catalog[name] = queue_id
+        if not catalog:
+            raise ValueError("Empty queue catalog")
+        schedules = {name: parse_schedule(active, slots, queue_id) for name, queue_id in catalog.items()}
         now = datetime.now(UTC)
-        if now.astimezone(KYIV).date() not in schedule.days:
+        if any(now.astimezone(KYIV).date() not in schedule.days for schedule in schedules.values()):
             raise ValueError("Provider has no schedule for today")
-        previous = self.store.load_schedule()
-        if previous is not None:
-            # Ignore expired intervals when detecting changes; retain published dates.
-            def relevant(s):
-                return ([i for i in s.intervals if i.end > now],
-                        {d for d in s.days if d >= now.astimezone(KYIV).date()})
-            if relevant(previous) != relevant(schedule):
+        # Compare each queue independently, so unrelated changes don't notify users.
+        def relevant(s):
+            return ([i for i in s.intervals if i.end > now],
+                    {d for d in s.days if d >= now.astimezone(KYIV).date()})
+        updates = {}
+        for name, schedule in schedules.items():
+            previous = self.store.load_schedule(name)
+            if previous is not None and relevant(previous) != relevant(schedule):
                 content = json.dumps(schedule.to_json(), sort_keys=True)
                 revision = hashlib.sha256(content.encode()).hexdigest()[:20]
                 for subscriber in self.store.subscribers():
-                    self.store.put(f"change:{subscriber['chat_id']}", revision)
-        self.store.put("schedule", schedule.to_json())
-        self.store.put("last_success", now.timestamp())
-        self.store.put("last_error", None)
-        LOG.info("Schedule fetched: %s intervals", len(schedule.intervals))
+                    if subscriber["queue"] == name:
+                        updates[f"change:{subscriber['chat_id']}"] = revision
+        # Publish the complete snapshot only after every queue has validated.
+        updates.update(schedules={name: s.to_json() for name, s in schedules.items()},
+                       queues=catalog, last_success=now.timestamp(), last_error=None)
+        self.store.put_many(updates)
+        LOG.info("Schedule fetched for %s queues", len(schedules))
 
     async def send_once(self, chat_id, key, text, now):
         if self.store.delivered(chat_id, key):
             return
-        await self.bot.send_message(chat_id, text + f"\n\nДжерело: {SOURCE}")
+        await self.bot.send_message(chat_id, text + f"\n\nДжерело: {SOURCE}",
+                                    reply_markup=menu(self.store.subscriber(chat_id)),
+                                    link_preview_options=LinkPreviewOptions(is_disabled=True))
         self.store.mark(chat_id, key, now)
         await asyncio.sleep(0.05)
 
@@ -86,9 +106,10 @@ class Application:
         if time.time() < self.not_before:
             return
         now = datetime.now(UTC)
-        schedule = self.store.load_schedule()
         for subscriber in self.store.subscribers():
             chat_id = subscriber["chat_id"]
+            queue = subscriber["queue"]
+            schedule = self.store.load_schedule(queue)
             try:
                 if not self.fresh(now.timestamp()):
                     # One warning per failure episode, after the initial grace period.
@@ -97,16 +118,24 @@ class Application:
                                              "⚠️ Не вдається оновити графік\n\nНагадування призупинено до отримання свіжих даних.", now.timestamp())
                     continue
                 if schedule is None:
+                    await self.send_once(chat_id, f"queue-unavailable:{queue}",
+                                         f"⚠️ Графік черги {queue} недоступний.\nОберіть іншу чергу кнопкою нижче.", now.timestamp())
                     continue
                 revision = self.store.get(f"change:{chat_id}")
                 if revision:
                     day = now.astimezone(KYIV).date()
-                    await self.send_once(chat_id, f"change:{revision}",
+                    await self.send_once(chat_id, f"queue:{queue}:change:{revision}",
                                          "🔄 Графік змінився\nПопередні нагадування можуть бути неактуальними.\n\n" +
-                                         render_day(schedule, day) + "\n\n" + render_day(schedule, day + timedelta(days=1)), now.timestamp())
-                    self.store.put(f"change:{chat_id}", None)
-                for key, text in due_events(schedule, now, subscriber["minutes"], subscriber["since"]):
-                    await self.send_once(chat_id, key, text, now.timestamp())
+                                         render_day(schedule, day, queue) + "\n\n" + render_day(schedule, day + timedelta(days=1), queue), now.timestamp())
+                    if self.store.get(f"change:{chat_id}") == revision:
+                        self.store.put(f"change:{chat_id}", None)
+                for key, text in due_events(schedule, now, subscriber["minutes"], subscriber["since"], queue):
+                    current = self.store.subscriber(chat_id)
+                    if current is None or not current["active"] or current["queue"] != queue:
+                        break
+                    if queue == "5.1" and self.store.delivered(chat_id, key):
+                        continue  # Preserve default-queue delivery history from older versions.
+                    await self.send_once(chat_id, f"queue:{queue}:{key}", text, now.timestamp())
             except TelegramForbiddenError:
                 self.store.pause(chat_id)
             except TelegramRetryAfter as exc:
@@ -134,49 +163,68 @@ class Application:
             await self.notify()
             await asyncio.sleep(20)
 
-    async def command(self, message: Message):
-        if message.chat.type != "private" or not message.text:
-            return
-        words = message.text.split()
-        command = words[0].split("@")[0]
-        chat_id = message.chat.id
+    def screen(self, chat_id, command, arguments=()):
+        words = [command, *arguments]
         now = datetime.now(UTC)
-        schedule = self.store.load_schedule()
+        subscriber = self.store.subscriber(chat_id)
+        queue = subscriber["queue"] if subscriber else "5.1"
+        schedule = self.store.load_schedule(queue)
+        available = sorted(self.store.get("queues", dict.fromkeys(DEFAULT_QUEUES)),
+                           key=lambda name: tuple(map(int, name.split("."))))
         if command in {"/start", "/resume"}:
             self.store.subscribe(chat_id, now.timestamp())
             self.store.put(f"change:{chat_id}", None)
             subscriber = self.store.subscriber(chat_id)
-            text = ("🔔 Сповіщення увімкнено\nМиколаївобленерго · черга 5.1\n"
+            text = (f"🔔 Сповіщення увімкнено\nМиколаївобленерго · черга {queue}\n"
                     f"Нагадування за {subscriber['minutes']} хв\n\n"
-                    f"{HELP_TEXT}\n\n"
+                    "Оберіть дію нижче. Щоб змінити чергу, натисніть кнопку з її номером.\n\n"
                     "Повідомлення базуються на графіку й не підтверджують фактичний стан світла.")
+        elif command == "/queue":
+            if len(words) == 1:
+                text = (f"🔢 Поточна черга: {queue}\n\nНатисніть номер потрібної черги.\n"
+                        "Вибір змінює графік і сповіщення лише для вас.")
+            elif len(words) != 2 or words[1] not in available:
+                text = "Невідома черга.\nОберіть доступну чергу нижче."
+            elif subscriber is None:
+                text = "Спочатку увімкніть сповіщення, потім оберіть чергу."
+            elif words[1] == queue:
+                text = f"Черга {queue} вже обрана.\nНатисніть «Показати графік»."
+            else:
+                self.store.select_queue(chat_id, words[1], now.timestamp())
+                text = (f"✅ Обрано чергу {words[1]}\n\nГрафіки та сповіщення тепер для цієї черги.\n"
+                        "Натисніть «Показати графік», щоб переглянути розклад.")
+                if not subscriber["active"]:
+                    text += "\nСповіщення залишаються призупиненими. Увімкнути їх можна в головному меню."
         elif command == "/delete":
             self.store.forget(chat_id)
             text = "Підписку та історію сповіщень видалено."
         elif command == "/pause":
             self.store.pause(chat_id)
-            text = "Сповіщення призупинено\n\n/resume — увімкнути знову."
+            text = "⏸️ Сповіщення призупинено\n\nГрафік доступний. Щоб відновити нагадування, натисніть «Увімкнути сповіщення»."
         elif command == "/settings":
             subscriber = self.store.subscriber(chat_id)
             if subscriber is None:
-                text = "Спочатку виконайте /start."
+                text = "Спочатку увімкніть сповіщення кнопкою нижче."
             elif len(words) == 2 and words[1] in {"15", "30"}:
                 self.store.reminder(chat_id, int(words[1]))
                 text = f"🔔 Нагадування за {words[1]} хв."
             else:
-                text = (f"Нагадування за {subscriber['minutes']} хв\n\n"
-                        "Оберіть час:\n/settings 15 — за 15 хв\n/settings 30 — за 30 хв")
+                text = (f"⚙️ Налаштування · черга {queue}\n\nНагадування за {subscriber['minutes']} хв\n"
+                        f"Сповіщення: {'увімкнено' if subscriber['active'] else 'призупинено'}\n\n"
+                        "Оберіть час нагадування нижче.")
         elif command == "/status":
             last = self.store.get("last_success")
             stamp = datetime.fromtimestamp(last, KYIV).strftime("%d.%m %H:%M:%S") if last else "ще немає"
             subscriber = self.store.subscriber(chat_id)
             indicator = "✅" if self.fresh(now.timestamp()) else "⚠️"
-            text = (f"{indicator} Стан бота\nМиколаївобленерго · черга 5.1\n\n"
+            text = (f"{indicator} Стан бота\nМиколаївобленерго · черга {queue}\n\n"
                     f"Дані: {'свіжі' if self.fresh(now.timestamp()) else 'застарілі / недоступні'}\n"
                     f"Останнє оновлення: {stamp} (Київ)\n\n"
                     f"Сповіщення: {'увімкнено' if subscriber and subscriber['active'] else 'вимкнено'}")
             if subscriber:
                 text += f"\nНагадування за {subscriber['minutes']} хв"
+            if schedule is None:
+                text += "\nГрафік обраної черги недоступний."
         elif command in {"/today", "/tomorrow", "/next"}:
             if schedule is None:
                 text = "Графік поки недоступний. Спробуйте пізніше."
@@ -184,17 +232,66 @@ class Application:
                 upcoming = next((i for i in schedule.intervals if i.end > now), None)
                 if upcoming:
                     title = "Поточний інтервал" if upcoming.start <= now else "Наступний інтервал"
-                    text = f"{title}\nЧерга 5.1 · час за Києвом\n\n{describe(upcoming)}"
+                    text = f"{title}\nЧерга {queue} · час за Києвом\n\n{describe(upcoming)}"
                 else:
                     text = "У доступному графіку немає наступних інтервалів."
             else:
                 day = now.astimezone(KYIV).date() + timedelta(days=command == "/tomorrow")
-                text = render_day(schedule, day)
+                text = render_day(schedule, day, queue)
             if schedule and not self.fresh(now.timestamp()):
                 text = "⚠️ Збережені дані застарілі.\n\n" + text
+        elif command == "/menu":
+            text = (f"Миколаївобленерго · черга {queue}\n\nОберіть дію нижче.\n"
+                    "Час у графіках — за Києвом.")
         else:
             text = HELP_TEXT
-        await message.answer(text + f"\n\nДжерело: {SOURCE}")
+        current = self.store.subscriber(chat_id)
+        if command == "/queue" and current:
+            keyboard = queue_menu(available, current["queue"])
+        elif command == "/settings":
+            keyboard = settings_menu(current)
+        else:
+            keyboard = menu(current)
+        return text + f"\n\nДжерело: {SOURCE}", keyboard
+
+    async def command(self, message: Message):
+        if message.chat.type != "private" or not message.text:
+            return
+        words = message.text.split()
+        text, keyboard = self.screen(message.chat.id, words[0].split("@")[0], words[1:])
+        await message.answer(text, reply_markup=keyboard,
+                             link_preview_options=LinkPreviewOptions(is_disabled=True))
+
+    async def callback(self, query: CallbackQuery):
+        message = query.message
+        if not isinstance(message, Message) or message.chat.type != "private" or message.chat.id != query.from_user.id:
+            await query.answer("Відкрийте особистий чат із ботом.", show_alert=True)
+            return
+        parts = (query.data or "").split(":")
+        actions = {"menu", "today", "tomorrow", "next", "queue", "settings", "status",
+                   "pause", "resume", "start", "help", "delete", "delete_confirm"}
+        if len(parts) not in (2, 3) or parts[0] != "ui" or parts[1] not in actions or (len(parts) == 3 and parts[1] not in {"queue", "settings"}):
+            await query.answer("Ця кнопка недоступна. Відкрийте /menu.", show_alert=True)
+            return
+        # Acknowledge promptly so Telegram stops the loading indicator.
+        await query.answer()
+        action = parts[1]
+        if action == "delete":
+            text, keyboard = "Видалити підписку та історію сповіщень?\n\nНагадування буде вимкнено.", delete_menu()
+        else:
+            command = "/delete" if action == "delete_confirm" else f"/{action}"
+            text, keyboard = self.screen(message.chat.id, command, parts[2:])
+        try:
+            await self.bot.edit_message_text(text, chat_id=message.chat.id, message_id=message.message_id,
+                                             reply_markup=keyboard,
+                                             link_preview_options=LinkPreviewOptions(is_disabled=True))
+        except TelegramBadRequest as exc:
+            if "message is not modified" in exc.message.lower():
+                return
+            if "message to edit not found" not in exc.message.lower() and "message can't be edited" not in exc.message.lower():
+                raise
+            await self.bot.send_message(message.chat.id, text, reply_markup=keyboard,
+                                        link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 async def run():
@@ -214,12 +311,13 @@ async def run():
     async with Bot(token) as bot, httpx.AsyncClient(timeout=20, headers={"User-Agent": "MykolaivScheduleBot/0.1"}) as client:
         app = Application(bot, client, store, poll, stale)
         dispatcher = Dispatcher()
-        dispatcher.message.register(app.command, Command("start", "resume", "delete", "pause", "settings", "status", "today", "tomorrow", "next", "help"))
+        dispatcher.message.register(app.command, Command("start", "resume", "delete", "pause", "settings", "status", "today", "tomorrow", "next", "help", "queue", "menu"))
+        dispatcher.callback_query.register(app.callback)
         await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in [
-            ("today", "Графік на сьогодні"), ("tomorrow", "Графік на завтра"), ("next", "Наступне відключення"),
-            ("settings", "Налаштування"), ("status", "Свіжість даних"), ("pause", "Призупинити"), ("resume", "Відновити"), ("delete", "Видалити підписку")]])
+            ("menu", "Головне меню"), ("today", "Графік на сьогодні"), ("tomorrow", "Графік на завтра"), ("next", "Наступне відключення"),
+            ("queue", "Обрати чергу"), ("settings", "Налаштування"), ("status", "Свіжість даних"), ("pause", "Призупинити"), ("resume", "Відновити"), ("delete", "Видалити підписку")]])
         task = asyncio.create_task(app.worker())
-        polling = asyncio.create_task(dispatcher.start_polling(bot, allowed_updates=["message"]))
+        polling = asyncio.create_task(dispatcher.start_polling(bot, allowed_updates=["message", "callback_query"]))
         try:
             done, _ = await asyncio.wait({task, polling}, return_when=asyncio.FIRST_COMPLETED)
             for finished in done:
